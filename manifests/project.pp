@@ -30,7 +30,8 @@ define projects::project (
       members => $users,
     }
 
-    project_user { $users:
+    $hacked_users = prefix($users, "${title} group member ")
+    project_user { $hacked_users:
       group => $title
     }
 
@@ -98,7 +99,8 @@ define projects::project (
 define project_user (
   $group = undef
 ) {
-  User <| title == $title |> {
+  $user = regsubst($title, "^.* group member (.*)$", '\1')
+  User <| title == $user |> {
     groups +> $group,
   }
 }
