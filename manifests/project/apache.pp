@@ -10,12 +10,18 @@ define projects::project::apache (
     ensure_resource('class', '::apache', {
       default_vhost         => true,
       use_optional_includes => true,
-      mpm_module            => false
+      mpm_module            => false,
+      service_ensure        => running,
+      service_enable        => true,
+      server_signature      => 'Off',
+      server_tokens         => 'Prod',
     })
     include ::apache::mod::proxy
     include ::apache::mod::alias
     include ::apache::mod::proxy_http
     include ::apache::mod::proxy_ajp
+    include ::apache::mod::headers
+    include ::apache::mod::wsgi
     class {'::apache::mod::authnz_ldap':
       verifyServerCert => false
     }
@@ -24,6 +30,10 @@ define projects::project::apache (
 
     if defined(Class['::selinux']) {
       ensure_resource('selinux::boolean', 'httpd_can_connect_ldap', {'ensure' =>  'on'})
+      ensure_resource('selinux::boolean', 'httpd_can_network_connect_db', {'ensure' =>  'on'})
+      ensure_resource('selinux::boolean', 'httpd_can_network_connect', {'ensure' =>  'on'})
+      ensure_resource('selinux::boolean', 'httpd_can_sendmail', {'ensure' =>  'on'})
+      ensure_resource('selinux::boolean', 'httpd_can_network_memcache', {'ensure' =>  'on'})
     }
 
 
@@ -42,6 +52,8 @@ define projects::project::apache (
 
   if $apache_common['mpm'] == 'event' {
     include ::apache::mod::event
+  } elsif $apache_common['mpm'] == 'worker' {
+    include ::apache::mod::worker
   } else {
     include ::apache::mod::prefork
   }
@@ -52,19 +64,15 @@ define projects::project::apache (
     owner   => $apache_user,
     group   => $title,
     mode    => '0750',
-    seltype => 'var_log_t',
+    seltype => 'httpd_log_t',
     require => File["${::projects::basedir}/${title}/var/log"],
-  }
-
-  file { "/etc/logrotate.d/httpd-$title":
-    ensure  => present,
-    content => template('projects/apache/logrotate.erb'),
   }
 
   file { "${::projects::basedir}/${title}/etc/apache":
     ensure  => directory,
     owner   => $title,
     group   => $title,
+    seltype => 'httpd_config_t',
     require => File["${::projects::basedir}/${title}/etc"],
   }
 
@@ -81,6 +89,7 @@ define projects::project::apache (
     ensure  => directory,
     owner   => $title,
     group   => $title,
+    seltype => 'cert_t',
     require => File["${::projects::basedir}/${title}/etc"],
   }
 
@@ -95,7 +104,7 @@ define projects::project::apache (
   }
 
   sudo::conf { "${title}-apache":
-    content => "%${title} ALL= (ALL) /sbin/apachectl"
+    content => "%${title} ALL= (ALL) NOPASSWD: /sbin/apachectl"
   }
 
   create_resources('::projects::project::apache::vhost', $vhosts, {
@@ -116,7 +125,8 @@ define projects::project::apache::vhost (
   $php = false,
   $apache_user = 'apache',
   $altnames = [],
-  $ip = undef
+  $ip = undef,
+  $cert_name = $vhost_name,
 ) {
 
   if ($ip) {
@@ -151,21 +161,25 @@ define projects::project::apache::vhost (
     ssl                 => $ssl,
     docroot             => "${::projects::basedir}/${projectname}/var/${docroot}",
     logroot             => "${::projects::basedir}/${projectname}/var/log/httpd",
+    use_optional_includes => "true",
     additional_includes =>
       ["${::projects::basedir}/${projectname}/etc/apache/conf.d/*.conf",
       "${::projects::basedir}/${projectname}/etc/apache/conf.d/${title}/*.conf"],
     ssl_cert            =>
-      "${::projects::basedir}/${projectname}/etc/ssl/certs/${vhost_name}.crt",
+      "${::projects::basedir}/${projectname}/etc/ssl/certs/${cert_name}.crt",
+    ssl_chain           =>
+      "${::projects::basedir}/${projectname}/etc/ssl/certs/${cert_name}.crt",
     ssl_key             =>
-      "${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.key",
+      "${::projects::basedir}/${projectname}/etc/ssl/private/${cert_name}.key",
     serveraliases       => $altnames,
     access_log_env_var  => "!forwarded",
     custom_fragment     => "LogFormat \"%{X-Forwarded-For}i %l %u %t \\\"%r\\\" %s %b \\\"%{Referer}i\\\" \\\"%{User-Agent}i\\\"\" proxy
-SetEnvIf X-Forwarded-For \"^.*\..*\..*\..*\" forwarded
+SetEnvIf X-Forwarded-For \"^.*\\..*\\..*\\..*\" forwarded
 CustomLog \"${::projects::basedir}/${projectname}/var/log/httpd/${title}_access.log\" proxy env=forwarded",
     ip                  => $ip,
     ip_based            => $ip_based,
     add_listen          => false,
+    headers             => 'Set Strict-Transport-Security "max-age=63072000; includeSubdomains;"',
   }
 
   if !defined(Apache::Listen["$port"]) {
@@ -183,73 +197,12 @@ CustomLog \"${::projects::basedir}/${projectname}/var/log/httpd/${title}_access.
     }
   }
 
-  if $ssl == true {
-    $country= hiera('projects::ssl::country','GB')
-    if (hiera('projects::ssl::state','') != '') {
-      $state = hiera('projects::ssl::state')
-    }
-    if (hiera('projects::ssl::locality','') != '') {
-      $locality = hiera('projects::ssl::locality')
-    }
-    $organization = hiera('projects::ssl::organization','ACME')
-    if (hiera('projects::ssl::unit','') != '') {
-      $unit = hiera('projects::ssl::unit',nil)
-    }
-    $commonname = $vhost_name
-    if (hiera('projects::ssl::email','') != '') {
-      $email = hiera('projects::ssl::email',nil)
-    }
-    file {"${::projects::basedir}/${projectname}/etc/ssl/conf/${vhost_name}.cnf":
-      content => template('openssl/cert.cnf.erb'),
-      require  => File["${::projects::basedir}/${projectname}/etc/ssl/conf"],
-
-    }
-
-    ssl_pkey { "${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.auto.key" :
-      ensure   => present,
-      require  => File["${::projects::basedir}/${projectname}/etc/ssl/private"],
-    }
-
-    x509_request { "${::projects::basedir}/${projectname}/etc/ssl/csrs/${vhost_name}.auto.csr" :
-      ensure      => present,
-      template    => "${::projects::basedir}/${projectname}/etc/ssl/conf/${vhost_name}.cnf",
-      private_key => "${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.auto.key",
-      require => [Ssl_pkey["${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.auto.key"],File["${::projects::basedir}/${projectname}/etc/ssl/conf/${vhost_name}.cnf"]],
-    }
-
-    x509_cert { "${::projects::basedir}/${projectname}/etc/ssl/certs/${vhost_name}.auto.crt":
-      ensure      => present,
-      template    => "${::projects::basedir}/${projectname}/etc/ssl/conf/${vhost_name}.cnf",
-      private_key => "${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.auto.key",
-      days        => 4536,
-      require => [Ssl_pkey["${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.auto.key"],File["${::projects::basedir}/${projectname}/etc/ssl/conf/${vhost_name}.cnf"]],
-    }
-
-    exec { "deploy ${vhost_name}.key" :
-      command => "/bin/cp ${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.auto.key ${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.key",
-      onlyif  => "/bin/test ! -f ${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.key",
-      require => Ssl_pkey["${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.auto.key"],
-    }
-
-    file { "${::projects::basedir}/${projectname}/etc/ssl/private/${vhost_name}.key":
-      replace => 'no',
-      seltype => 'cert_t',
-      require => Exec["deploy ${vhost_name}.key"],
-    }
-
-    exec { "deploy ${vhost_name}.crt" :
-      command => "/bin/cp ${::projects::basedir}/${projectname}/etc/ssl/certs/${vhost_name}.auto.crt ${::projects::basedir}/${projectname}/etc/ssl/certs/${vhost_name}.crt",
-      onlyif  => "/bin/test ! -f ${::projects::basedir}/${projectname}/etc/ssl/certs/${vhost_name}.crt",
-      require => X509_cert["${::projects::basedir}/${projectname}/etc/ssl/certs/${vhost_name}.auto.crt"],
-    }
-
-    file { "${::projects::basedir}/${projectname}/etc/ssl/certs/${vhost_name}.crt": 
-      replace => 'no',
-      seltype => 'cert_t',
-      require => Exec["deploy ${vhost_name}.crt"],
-    }
-  }
-
+  ensure_resource('file', [
+	"${::projects::basedir}/${projectname}/etc/ssl/certs/${cert_name}.crt",
+	"${::projects::basedir}/${projectname}/etc/ssl/private/${cert_name}.key"
+    ],
+    { seltype => 'cert_t' }
+  )
 
   if !defined(Firewall["050 accept Apache ${port}"]) {
     firewall { "050 accept Apache ${port}":

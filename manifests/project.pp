@@ -34,29 +34,70 @@ define projects::project (
       group => $title
     }
 
-    file { [ "$::projects::basedir/$title",
-           "$::projects::basedir/$title/var",
-           "$::projects::basedir/$title/lib",
+    file { [
+           "$::projects::basedir/$title",
+           ] :
+      ensure => directory,
+      owner  => $uid,
+      group  => $gid,
+      mode   => '0755',
+    }
+
+    file { "$::projects::basedir/$title/.ssh":
+      ensure   => 'directory',
+      owner  => $uid,
+      group  => $gid,
+      mode     => '700',
+      seltype  => 'ssh_home_t',
+    }
+
+    file { "$::projects::basedir/$title/.settings":
+      ensure   => 'directory',
+      owner  => $uid,
+      group  => $gid,
+      mode     => '775',
+      seltype  => 'httpd_sys_content_t',
+    }
+
+    file { [
            "$::projects::basedir/$title/etc",
            ] :
       ensure => directory,
-      owner  => root,
-      group  => $title,
-      mode   => '0775'
+      owner  => $uid,
+      group  => $gid,
+      mode   => '0775',
     }
 
+    file { [
+           "$::projects::basedir/$title/var",
+           ] :
+      ensure => directory,
+      owner  => $uid,
+      group  => $gid,
+      seltype => 'httpd_sys_rw_content_t',
+      mode   => '0775',
+    }
+
+    file { [
+           "$::projects::basedir/$title/lib",
+           ] :
+      ensure => directory,
+      owner  => $uid,
+      group  => $gid,
+      mode   => '0775',
+      seltype => 'httpd_sys_content_t',
+    }
 
     file { "$::projects::basedir/$title/var/log":
       ensure  => directory,
-      owner   => root,
-      group   => $title,
-      mode    => '0750',
-      seltype => 'var_log_t',
-      require => File["$::projects::basedir/$title/var"],
+      owner   => $uid,
+      group   => $gid,
+      mode    => '0755',
+      seltype => 'httpd_log_t',
     }
 
     concat { "${::projects::basedir}/${title}/README":
-      owner => 'root',
+      owner => $title,
       group => $title,
       mode  => '0640',
     }
@@ -93,6 +134,10 @@ define projects::project (
       grant    => pick($mysql[grant],['ALL']),
     }
   }
+
+  sudo::conf { "${title}-reset-perms":
+    content => "%${title} ALL=(ALL) NOPASSWD: /usr/local/bin/reset-perms"
+  }
 }
 
 define project_user (
@@ -102,4 +147,3 @@ define project_user (
     groups +> $group,
   }
 }
-
